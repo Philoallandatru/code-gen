@@ -2,478 +2,563 @@
 
 ## 概述
 
-本文档描述 TestCase Generation System 的完整架构设计,包括各层职责、数据流、关键决策等。
+OpenCode TestCase 自动生成系统是一个轻量级、开发者友好的工具集，旨在提高 AI 代码生成的准确性和可靠性。
 
 ## 设计目标
 
-1. **准确性**: 确保生成的 TestCase 准确使用 Lib API 和 YAML 配置
-2. **可验证性**: 所有生成结果都可以自动校验
-3. **可追溯性**: 保留完整的生成上下文和决策过程
-4. **易用性**: 开发者友好的工作流
-5. **可扩展性**: 支持 100-500 个 TestCase 的规模
+1. **准确性**: 将 TestCase 生成准确率从 60-70% 提升到 95%+
+2. **可控性**: 防止 LLM 编造不存在的 API 或配置
+3. **易用性**: 简单的命令行工具，无需复杂配置
+4. **可维护性**: 清晰的代码结构，易于扩展
 
-## 核心原则
-
-> **LLM 不允许自由猜测 Lib API;只能从已索引、已验证、已匹配的 Lib API 和 YAML schema 中选择。**
-
-这是整个系统的核心约束,所有设计都围绕这个原则展开。
-
-## 系统架构
-
-### 整体架构图
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    TestCase Generation System                │
-└─────────────────────────────────────────────────────────────┘
-
-1. Registry Layer (注册表层)
-   ├── Lib API Registry Builder      # 扫描Lib生成API索引
-   ├── YAML Schema Registry Builder  # 扫描YAML生成Schema
-   └── TestCase Pattern Extractor    # 提取已有Case模式
-
-2. Matching Layer (匹配层)
-   ├── Requirement Parser            # 解析需求
-   ├── Capability Matcher            # 匹配Lib能力
-   └── Similar Case Retriever        # 检索相似Case
-
-3. Contract Layer (契约层)
-   ├── Contract Generator            # 生成TestCase Contract
-   └── Contract Validator            # 验证Contract完整性
-
-4. Generation Layer (生成层)
-   └── OpenCode Integration          # OpenCode生成代码
-
-5. Validation Layer (校验层)
-   ├── API Usage Validator           # 校验API使用
-   ├── YAML Schema Validator         # 校验YAML结构
-   ├── Cross-Reference Validator     # 校验代码与YAML一致性
-   └── Style Validator               # 校验代码风格
-
-6. Feedback Layer (反馈层)
-   ├── Error Reporter                # 生成错误报告
-   └── Fix Helper                    # 修复助手
-```
-
-### 数据流
-
-```
-需求文本
-    ↓
-[Registry Layer] 扫描代码库,生成注册表
-    ↓
-[Matching Layer] 匹配相关API、Schema、相似Case
-    ↓
-[Contract Layer] 生成上下文包(Context Package)
-    ↓
-开发者复制到 OpenCode
-    ↓
-[Generation Layer] OpenCode 生成代码
-    ↓
-开发者保存到本地
-    ↓
-[Validation Layer] 多层校验
-    ↓
-[Feedback Layer] 生成修复建议
-    ↓
-开发者修复后提交
-```
-
-## 各层详细设计
+## 核心组件
 
 ### 1. Registry Layer (注册表层)
 
-**职责**: 扫描代码库,建立 API 和 Schema 的索引
+负责扫描和索引代码库中的资源。
 
 #### 1.1 Lib API Registry
 
 **数据结构**:
 ```json
 {
-  "apis": {
-    "power.wait_for_power_state": {
-      "api_id": "power.wait_for_power_state",
-      "file": "Lib/power/power_manager.py",
-      "class": "PowerManager",
-      "function": "wait_for_power_state",
-      "params": [
-        {"name": "target_state", "type": "str"},
-        {"name": "timeout_ms", "type": "int"}
-      ],
-      "docstring": "Wait until SSD enters target power state.",
-      "import_statement": "from Lib.power.power_manager import PowerManager"
+  "registry_version": "1.0",
+  "last_updated": "2024-01-15T14:30:22Z",
+  "scan_stats": {
+    "total_modules": 15,
+    "total_classes": 42,
+    "total_functions": 156
+  },
+  "apis": [
+    {
+      "id": "lib.device.Device.__init__",
+      "module": "Lib.device",
+      "file_path": "Lib/device.py",
+      "class_name": "Device",
+      "function_name": "__init__",
+      "signature": {
+        "parameters": [
+          {
+            "name": "device_id",
+            "type": "str",
+            "required": true,
+            "description": "设备ID"
+          }
+        ],
+        "return_type": "None"
+      },
+      "docstring": "初始化设备对象",
+      "usage_examples": [
+        "device = Device('PS4_001')"
+      ]
     }
-  }
+  ]
 }
 ```
 
-**扫描策略**:
-- 使用 Python AST 解析 Lib 目录下的所有 .py 文件
-- 提取类、方法、参数、类型注解、docstring
-- 缓存结果,1小时内有效
-- 增量更新机制
+**扫描逻辑**:
+- 使用 Python AST 解析 Lib/ 目录下的所有 .py 文件
+- 提取类、方法、函数的签名和文档
+- 缓存 1 小时，避免重复扫描
 
 #### 1.2 YAML Schema Registry
 
 **数据结构**:
 ```json
 {
-  "schemas": {
-    "low_power_latency_config": {
-      "schema_id": "low_power_latency_config",
-      "file": "configs/power/low_power_latency.yaml",
-      "fields": [
-        "case.id",
-        "case.name",
-        "power.target_state",
-        "power.entry_timeout_ms"
+  "registry_version": "1.0",
+  "last_updated": "2024-01-15T14:30:22Z",
+  "schemas": [
+    {
+      "schema_name": "test_case_config",
+      "required_fields": [
+        {
+          "field": "case.id",
+          "type": "string",
+          "pattern": "^TC_[A-Z]+_\\d{8}$",
+          "description": "测试用例ID"
+        },
+        {
+          "field": "case.name",
+          "type": "string",
+          "description": "测试用例名称"
+        }
       ],
-      "example": { /* 完整的YAML示例 */ }
+      "optional_fields": [
+        {
+          "field": "case.tags",
+          "type": "array",
+          "description": "标签列表"
+        }
+      ],
+      "examples": [
+        {
+          "file": "configs/test_power_ps4.yaml",
+          "content": "..."
+        }
+      ]
     }
-  }
+  ]
 }
 ```
 
-**扫描策略**:
-- 递归扫描 configs 目录下的所有 .yaml 文件
-- 提取字段路径、类型、示例值
-- 识别常见模式和约束
+**扫描逻辑**:
+- 解析 configs/ 目录下的所有 .yaml 文件
+- 提取字段结构和类型
+- 识别必填字段和可选字段
 
 #### 1.3 TestCase Pattern Registry
 
 **数据结构**:
 ```json
 {
+  "registry_version": "1.0",
+  "last_updated": "2024-01-15T14:30:22Z",
   "patterns": {
-    "test_apst_entry": {
-      "file": "TestCase/Power/test_apst_entry.py",
-      "imports": [
-        "from Lib.power.power_manager import PowerManager"
+    "common_imports": [
+      "import unittest",
+      "from Lib.device import Device"
+    ],
+    "common_structure": {
+      "class_pattern": "class Test{Feature}(unittest.TestCase)",
+      "setup_pattern": "def setUp(self): ...",
+      "test_pattern": "def test_{action}(self): ..."
+    },
+    "common_practices": [
+      "使用 try-finally 确保资源清理",
+      "使用 load_case_config() 加载配置",
+      "使用 self.assertEqual() 进行断言"
+    ]
+  },
+  "cases": [
+    {
+      "file": "TestCase/test_power_ps4.py",
+      "description": "PS4电源控制测试",
+      "apis_used": [
+        "Lib.device.Device",
+        "Lib.power.PowerController"
       ],
-      "test_methods": [
-        {"name": "test_apst_entry", "has_try_finally": true}
-      ],
-      "snippet": "前500字符的代码片段"
+      "yaml_fields_used": [
+        "case.id",
+        "device.id",
+        "power.actions"
+      ]
     }
-  }
+  ]
 }
 ```
 
-**扫描策略**:
-- 扫描 TestCase 目录下的所有 test_*.py 文件
-- 提取 import 语句、测试方法结构
-- 识别常见模式(try-finally、cleanup等)
+**扫描逻辑**:
+- 解析 TestCase/ 目录下的所有 .py 文件
+- 提取 import 语句、类结构、方法模式
+- 分析 API 使用和 YAML 字段引用
 
 ### 2. Matching Layer (匹配层)
 
-**职责**: 根据需求匹配相关的 API、Schema 和相似 Case
+负责根据需求匹配相关的 API、Schema 和相似案例。
 
 #### 2.1 Requirement Parser
 
-**输入**: 原始需求文本
-```
-"验证SSD在idle 500ms后能够进入PS4低功耗状态"
-```
+**输入**: 用户需求描述（自然语言）
 
 **输出**: 结构化需求
-```json
+```python
 {
-  "raw_text": "验证SSD在idle 500ms后能够进入PS4低功耗状态",
-  "keywords": ["power", "PS4", "idle", "low_power"]
+    "feature": "电源控制",
+    "device_type": "PS4",
+    "actions": ["开机", "关机", "重启"],
+    "keywords": ["power", "ps4", "control"]
 }
 ```
 
-**解析策略**:
-- 关键词提取(基于预定义的关键词映射表)
-- 简单的模式匹配
-- 未来可扩展为 NLP 解析
+**解析逻辑**:
+- 提取关键词（设备类型、功能、动作）
+- 识别测试场景（正常流程、异常处理）
 
-#### 2.2 Capability Matcher
+#### 2.2 API Matcher
+
+**输入**: 结构化需求 + Lib API Registry
+
+**输出**: 相关 API 列表
 
 **匹配策略**:
-1. **关键词匹配** - 快速过滤候选 API
-2. **语义匹配** (可选) - 使用 embedding 计算相似度
-3. **依赖分析** - 自动补充相关的 API
-
-**输出**: Top-K 匹配的 API 列表
+1. **关键词匹配**: 基于需求关键词匹配 API 名称和文档
+2. **依赖分析**: 如果匹配到某个类，自动包含其依赖的类
+3. **相似度排序**: 按相关性排序，取 Top-K
 
 #### 2.3 Similar Case Retriever
 
+**输入**: 结构化需求 + TestCase Pattern Registry
+
+**输出**: 相似测试用例列表
+
 **检索策略**:
-1. **基于 API 使用的检索** - 找到使用相同 API 的 Case
-2. **基于关键词的检索** - BM25 算法
-3. **混合排序** - 综合多个信号
+1. **TF-IDF 向量化**: 将需求和已有 Case 描述向量化
+2. **余弦相似度**: 计算相似度分数
+3. **Top-K 检索**: 返回最相似的 3-5 个案例
 
-**输出**: Top-5 相似 Case
+### 3. Generation Layer (生成层)
 
-### 3. Contract Layer (契约层)
+负责构建给 OpenCode 的 Prompt。
 
-**职责**: 生成明确的上下文包,约束 OpenCode 的生成行为
-
-#### 3.1 Context Package 结构
+#### 3.1 Context Package Structure
 
 ```
-context_packages/package_20260428_103045/
-├── context.md        # 完整上下文(API、Schema、相似Case)
-├── prompt.md         # 给OpenCode的最终prompt
-└── metadata.json     # 元数据(用于后续校验)
+.opencode/context_packages/package_20240115_143022/
+├── context.md          # 完整上下文
+├── prompt.md           # 给OpenCode的prompt
+└── metadata.json       # 元数据
 ```
 
-#### 3.2 Prompt 模板
+#### 3.2 Prompt Template
 
-**关键部分**:
-1. **CRITICAL RULES** - 严格约束
-2. **Allowed Lib APIs** - 白名单
-3. **YAML Configuration Schema** - Schema定义
-4. **Similar TestCases** - 参考示例
-5. **Output Format** - 输出格式要求
+```markdown
+# TestCase 生成任务
 
-**设计原则**:
-- 明确 > 隐含
-- 约束 > 自由
-- 示例 > 描述
+## 需求描述
+{requirement}
 
-### 4. Generation Layer (生成层)
+## CRITICAL RULES - 必须严格遵守
 
-**职责**: 与 OpenCode 集成,生成代码
+1. **API 使用约束**:
+   - 只能使用下面 "Allowed APIs" 中列出的 API
+   - 禁止使用任何未列出的 import 或函数
+   - 禁止编造不存在的 API
 
-#### 4.1 OpenCode 集成方式
+2. **YAML 配置约束**:
+   - 只能使用下面 "YAML Schema" 中定义的字段
+   - 必须包含所有必填字段
+   - 禁止使用未定义的字段
 
-**手动工作流**:
-1. 开发者打开 prompt.md
-2. 复制全部内容到 OpenCode
-3. OpenCode 生成代码
-4. 开发者保存到本地
+3. **代码结构约束**:
+   - 必须继承 unittest.TestCase
+   - 必须调用 load_case_config() 加载配置
+   - 必须使用 try-finally 确保资源清理
+   - 必须有模块级 docstring
 
-**未来可扩展**:
-- OpenCode API 集成(如果提供)
-- 自动化脚本
+## Allowed APIs
 
-### 5. Validation Layer (校验层)
+{allowed_apis}
 
-**职责**: 多维度校验生成的代码
+## YAML Schema
 
-#### 5.1 API Usage Validator
+{yaml_schema}
 
-**校验项**:
-- Import 语句是否在白名单中
-- 函数调用是否在白名单中
-- 参数数量是否匹配
-- 是否有硬编码的配置值
-- 是否有 try-finally 结构
+## Similar Cases (参考)
 
-**实现方式**: Python AST 解析
+{similar_cases}
 
-#### 5.2 YAML Schema Validator
+## 输出要求
 
-**校验项**:
-- 必填字段是否存在
-- 字段类型是否正确
-- 字段值是否在允许范围内
-- 字段格式是否符合 pattern
-
-**实现方式**: YAML 解析 + Schema 验证
-
-#### 5.3 Cross-Reference Validator
-
-**校验项**:
-- Python 读取的 YAML 字段是否存在
-- YAML 定义的字段是否被使用
-- Case ID 是否一致
-- API 参数来源是否正确
-
-**实现方式**: AST + YAML 交叉分析
-
-#### 5.4 Style Validator
-
-**校验项**:
-- 是否有 docstring
-- 代码风格是否符合规范
-- 命名是否规范
-
-**实现方式**: Pylint / Flake8 集成
-
-### 6. Feedback Layer (反馈层)
-
-**职责**: 生成修复建议,辅助开发者修复问题
-
-#### 6.1 Error Reporter
-
-**输出格式**:
-```
-❌ ERRORS (Must Fix)
-1. [API Usage] 使用了未授权的API: power.wait_for_state
-   💡 Suggestion: 你是否想使用 'power.wait_for_power_state'?
-
-⚠️  WARNINGS (Should Fix)
-1. [Code Style] 发现可能的硬编码值: PS4
-   💡 Suggestion: 建议将配置值放在YAML中
+生成两个文件:
+1. TestCase/test_{feature}.py - Python 测试代码
+2. configs/test_{feature}.yaml - YAML 配置文件
 ```
 
-#### 6.2 Fix Helper
+### 4. Validation Layer (校验层)
 
-**功能**:
-1. **生成修复指南** - 详细的修复步骤
-2. **自动修复** - 修复简单问题(Case ID、docstring等)
-3. **相似 API 建议** - 使用 difflib 查找相似 API
+负责校验生成的代码。
 
-## 关键设计决策
+#### 4.1 API Usage Validator
 
-### 决策 1: 为什么使用注册表而不是实时扫描?
+**校验规则**:
+- 检查所有 import 语句是否在白名单中
+- 检查所有函数调用是否在白名单中
+- 提供相似 API 建议
 
-**原因**:
-- 扫描代码库耗时(几十秒到几分钟)
-- 大部分时间 Lib 和 YAML 不会变化
-- 缓存可以显著提升用户体验
+**实现**:
+```python
+def validate_api_usage(python_code, allowed_apis):
+    issues = []
+    
+    # 解析 Python 代码
+    tree = ast.parse(python_code)
+    
+    # 检查 import
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if not is_allowed(alias.name, allowed_apis):
+                    issues.append({
+                        "type": "unauthorized_import",
+                        "module": alias.name,
+                        "suggestion": find_similar_api(alias.name, allowed_apis)
+                    })
+    
+    return issues
+```
 
-**权衡**:
-- 优点: 快速响应
-- 缺点: 可能不是最新状态
-- 解决: 1小时缓存过期 + 手动刷新选项
+#### 4.2 YAML Schema Validator
 
-### 决策 2: 为什么使用白名单而不是黑名单?
+**校验规则**:
+- 检查必填字段是否存在
+- 检查字段类型是否正确
+- 检查字段格式是否符合规范
 
-**原因**:
-- 白名单更安全,默认拒绝
-- 黑名单容易遗漏
-- 符合"只能使用已验证的 API"的原则
+**实现**:
+```python
+def validate_yaml_schema(yaml_content, schema):
+    issues = []
+    
+    # 检查必填字段
+    for field in schema["required_fields"]:
+        if not has_field(yaml_content, field["field"]):
+            issues.append({
+                "type": "missing_required_field",
+                "field": field["field"],
+                "description": field["description"]
+            })
+    
+    return issues
+```
 
-**权衡**:
-- 优点: 更严格的约束
-- 缺点: 需要维护白名单
-- 解决: 自动扫描生成白名单
+#### 4.3 Cross-Reference Validator
 
-### 决策 3: 为什么不直接调用 OpenCode API?
+**校验规则**:
+- 检查 Python 中读取的 YAML 字段是否存在
+- 检查 Case ID 在 Python 和 YAML 中是否一致
 
-**原因**:
-- OpenCode 可能不提供 API
-- 手动工作流更灵活,开发者可以调整 prompt
-- 降低系统复杂度
+**实现**:
+```python
+def validate_cross_reference(python_code, yaml_content):
+    issues = []
+    
+    # 提取 Python 中读取的 YAML 字段
+    yaml_fields = extract_yaml_field_access(python_code)
+    
+    # 检查字段是否存在
+    for field in yaml_fields:
+        if not has_field(yaml_content, field):
+            issues.append({
+                "type": "yaml_field_not_found",
+                "field": field,
+                "suggestion": "检查 YAML 配置或修改 Python 代码"
+            })
+    
+    return issues
+```
 
-**权衡**:
-- 优点: 简单、灵活
-- 缺点: 需要手动操作
-- 未来: 如果 OpenCode 提供 API,可以扩展
+### 5. Feedback Layer (反馈层)
 
-### 决策 4: 为什么使用 AST 而不是正则表达式?
+负责生成修复建议和自动修复。
 
-**原因**:
-- AST 更准确,不会误判
-- 可以提取结构化信息(参数、类型等)
-- Python 标准库支持
+#### 5.1 Fix Guide Generator
 
-**权衡**:
-- 优点: 准确、可靠
-- 缺点: 稍微复杂
-- 解决: 封装成工具函数
+**输入**: 校验问题列表
 
-### 决策 5: 为什么使用 Git Hook 而不是 CI/CD?
+**输出**: 修复指南文档
 
-**原因**:
-- Git Hook 更早发现问题(提交前)
-- 减少 CI/CD 负担
-- 更快的反馈循环
+**生成逻辑**:
+- 按严重程度排序问题
+- 为每个问题生成详细的修复步骤
+- 提供代码示例
 
-**权衡**:
-- 优点: 快速反馈
-- 缺点: 可以被 --no-verify 绕过
-- 解决: 同时在 CI/CD 中也校验
+#### 5.2 Auto Fixer
 
-## 性能考虑
+**支持的自动修复**:
+1. 添加缺失的 YAML 必填字段
+2. 统一 Python 和 YAML 中的 Case ID
+3. 添加缺失的 docstring
+4. 修正 Case ID 格式
 
-### 注册表扫描性能
+**实现**:
+```python
+def auto_fix(python_file, yaml_file, issues):
+    fixes_applied = []
+    
+    for issue in issues:
+        if issue["type"] == "missing_required_field":
+            # 自动添加字段
+            add_yaml_field(yaml_file, issue["field"], generate_default_value(issue))
+            fixes_applied.append(issue)
+        
+        elif issue["type"] == "case_id_mismatch":
+            # 统一 Case ID
+            unified_id = generate_case_id()
+            update_python_case_id(python_file, unified_id)
+            update_yaml_case_id(yaml_file, unified_id)
+            fixes_applied.append(issue)
+    
+    return fixes_applied
+```
 
-**预期性能**:
-- 扫描 50 个 Lib 文件: ~5 秒
-- 扫描 100 个 YAML 文件: ~2 秒
-- 扫描 200 个 TestCase 文件: ~10 秒
-- 总计: ~20 秒(首次)
+## 数据流
 
-**优化策略**:
-- 缓存机制(1小时)
-- 增量扫描(只扫描变更的文件)
-- 并发扫描(使用多进程)
+```
+用户需求
+    ↓
+[1. Registry Layer]
+    ├─ 扫描 Lib/ → Lib API Registry
+    ├─ 扫描 configs/ → YAML Schema Registry
+    └─ 扫描 TestCase/ → TestCase Pattern Registry
+    ↓
+[2. Matching Layer]
+    ├─ 解析需求 → 结构化需求
+    ├─ 匹配 API → 相关 API 列表
+    └─ 检索相似 Case → 相似案例列表
+    ↓
+[3. Generation Layer]
+    └─ 构建 Prompt → context.md + prompt.md
+    ↓
+[人工操作: 复制 prompt.md 到 OpenCode]
+    ↓
+[OpenCode 生成代码]
+    ↓
+[人工操作: 下载代码到本地]
+    ↓
+[4. Validation Layer]
+    ├─ API 使用校验
+    ├─ YAML Schema 校验
+    └─ 交叉引用校验
+    ↓
+[5. Feedback Layer]
+    ├─ 生成修复指南
+    └─ 自动修复（可选）
+    ↓
+[人工审核: 检查代码]
+    ↓
+[Git Commit]
+    ↓
+[Pre-commit Hook: 自动校验]
+    ↓
+[Push to Bitbucket]
+```
 
-### 校验性能
+## 技术选型
 
-**预期性能**:
-- API 使用校验: <1 秒
-- YAML Schema 校验: <1 秒
-- 交叉引用校验: <1 秒
-- 总计: ~3 秒
+### 核心技术
 
-**优化策略**:
-- AST 缓存
-- 并行校验
+- **Python 3.7+**: 主要开发语言
+- **AST (Abstract Syntax Tree)**: 代码解析和分析
+- **PyYAML**: YAML 文件解析
+- **Git Hooks**: 自动化校验
 
-## 可扩展性
+### 为什么不使用数据库？
 
-### 支持更多 AI 工具
+- **轻量级**: 避免额外的依赖和配置
+- **可移植**: 基于文件系统，易于版本控制
+- **快速启动**: 无需安装和配置数据库
 
-当前设计针对 OpenCode,但架构是通用的:
-- Contract Layer 生成的上下文包可以用于任何 LLM
-- 只需调整 prompt 模板格式
+### 为什么不使用向量数据库？
 
-### 支持更多语言
+- **规模适中**: 100-500 个 TestCase，TF-IDF + Cosine 足够
+- **简单高效**: 避免引入复杂的依赖
+- **可扩展**: 如果规模增长，可以轻松迁移到向量数据库
 
-当前实现是 Python,但架构可以扩展:
-- Registry Layer: 使用对应语言的 AST 解析器
-- Validation Layer: 使用对应语言的校验工具
+## 性能优化
 
-### 支持更复杂的匹配
+### 1. 注册表缓存
 
-当前使用简单的关键词匹配,可以扩展:
-- 语义匹配(使用 embedding)
-- 图匹配(基于 API 依赖图)
-- 机器学习模型
+- 缓存有效期: 1 小时
+- 缓存失效策略: 时间戳检查
+- 强制刷新: 删除缓存文件
 
-## 安全考虑
+### 2. 增量扫描
 
-### 代码注入风险
+- 只扫描修改过的文件
+- 基于文件修改时间判断
 
-**风险**: OpenCode 生成的代码可能包含恶意代码
+### 3. 并行处理
 
-**缓解措施**:
-- 校验层检查危险操作
-- 人工 Code Review
-- 沙箱测试环境
+- 多个文件的扫描可以并行
+- 使用 Python multiprocessing
 
-### 敏感信息泄露
+## 扩展性
 
-**风险**: 上下文包可能包含敏感信息
+### 1. 支持更多语言
 
-**缓解措施**:
-- 不扫描包含敏感信息的文件
-- 脱敏处理
-- 访问控制
+当前系统专注于 Python，但架构设计支持扩展到其他语言：
 
-## 监控和度量
+- 替换 AST 解析器（如 Java 使用 JavaParser）
+- 调整 API 提取逻辑
+- 其他组件保持不变
 
-### 关键指标
+### 2. 支持更多 AI 工具
 
-1. **生成成功率** - 校验通过的比例
-2. **首次通过率** - 不需要修复就通过的比例
-3. **平均修复次数** - 平均需要修复几次
-4. **常见错误类型** - 统计最常见的错误
+当前系统针对 OpenCode，但可以轻松适配其他 AI 工具：
 
-### 日志记录
+- 调整 Prompt 模板
+- 保持校验和修复逻辑不变
 
-- 每次生成记录完整的上下文包
-- 每次校验记录详细的错误信息
-- 每次修复记录修复前后的对比
+### 3. 集成 CI/CD
 
-## 未来改进方向
+可以集成到 Bitbucket Pipelines：
 
-1. **智能 Prompt 优化** - 根据历史错误自动优化 prompt
-2. **API 推荐** - 基于需求自动推荐最合适的 API
-3. **自动化测试** - 生成后自动运行测试
-4. **团队协作** - 共享上下文包和最佳实践
-5. **可视化界面** - Web UI 替代命令行工具
+```yaml
+# bitbucket-pipelines.yml
+pipelines:
+  pull-requests:
+    '**':
+      - step:
+          name: Validate TestCases
+          script:
+            - pip install -r requirements.txt
+            - python .opencode/tools/validate_all.py
+```
+
+## 安全性
+
+### 1. 代码注入防护
+
+- 使用 AST 解析，不执行用户代码
+- 校验器只读取文件，不执行
+
+### 2. 路径遍历防护
+
+- 限制文件访问范围在项目目录内
+- 验证文件路径合法性
+
+### 3. 敏感信息保护
+
+- 不在日志中输出敏感信息
+- 不上传代码到外部服务（除了 OpenCode）
+
+## 监控和日志
+
+### 1. 生成日志
+
+记录每次生成的详细信息：
+- 需求描述
+- 匹配的 API 数量
+- 相似案例数量
+- 生成时间
+
+### 2. 校验日志
+
+记录每次校验的结果：
+- 校验通过/失败
+- 问题类型和数量
+- 修复建议
+
+### 3. 统计指标
+
+- 生成成功率
+- 校验通过率
+- 自动修复成功率
+- 平均生成时间
+
+## 未来改进
+
+### 1. 智能 Prompt 优化
+
+- 根据历史生成结果优化 Prompt
+- A/B 测试不同的 Prompt 模板
+
+### 2. 增强相似度检索
+
+- 使用语义向量（如 Sentence-BERT）
+- 支持多模态检索（代码 + 文档）
+
+### 3. 交互式修复
+
+- 提供 Web UI 进行交互式修复
+- 实时预览修复效果
+
+### 4. 团队协作
+
+- 共享注册表和上下文包
+- 团队级别的最佳实践库
 
 ## 总结
 
-本系统通过分层架构和严格的约束机制,确保 OpenCode 生成的 TestCase 准确使用 Lib API 和 YAML 配置。核心思想是:
-
-> **不让 LLM 自由发挥,而是给它明确的约束和参考。**
-
-通过注册表、白名单、多层校验等机制,将生成准确率提升到 95% 以上。
+OpenCode TestCase 自动生成系统通过多层防御策略，确保 AI 生成的代码准确、可靠、可维护。系统设计轻量级、易用、可扩展，适合中小型团队快速落地使用。

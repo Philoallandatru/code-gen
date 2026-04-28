@@ -1,0 +1,83 @@
+#!/bin/bash
+# OpenCode生成的TestCase提交前自动校验
+
+echo "🔍 OpenCode TestCase Pre-commit Hook"
+echo ""
+
+# 检查是否有TestCase文件被修改
+TESTCASE_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep "^TestCase/.*\.py$")
+CONFIG_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep "^configs/.*\.yaml$")
+
+if [ -z "$TESTCASE_FILES" ] && [ -z "$CONFIG_FILES" ]; then
+    echo "✅ No TestCase files to validate"
+    exit 0
+fi
+
+echo "📋 Found TestCase files to validate:"
+echo "$TESTCASE_FILES"
+echo ""
+
+# 检查Python是否可用
+if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+    echo "⚠️  Warning: Python not found, skipping validation"
+    exit 0
+fi
+
+PYTHON_CMD="python3"
+if ! command -v python3 &> /dev/null; then
+    PYTHON_CMD="python"
+fi
+
+# 检查是否有对应的上下文包
+VALIDATION_FAILED=0
+
+for TESTCASE_FILE in $TESTCASE_FILES; do
+    # 查找对应的YAML文件
+    TESTCASE_NAME=$(basename "$TESTCASE_FILE" .py)
+    CONFIG_FILE=$(find configs -name "*${TESTCASE_NAME#test_}*.yaml" 2>/dev/null | head -1)
+
+    if [ -z "$CONFIG_FILE" ]; then
+        echo "⚠️  Warning: No config file found for $TESTCASE_FILE"
+        continue
+    fi
+
+    # 查找最近的上下文包
+    LATEST_PACKAGE=$(ls -t .opencode/context_packages/ 2>/dev/null | head -1)
+
+    if [ -z "$LATEST_PACKAGE" ]; then
+        echo "⚠️  Warning: No context package found, skipping validation"
+        continue
+    fi
+
+    echo "🔍 Validating $TESTCASE_FILE..."
+
+    # 运行校验
+    $PYTHON_CMD .opencode/tools/validate_case.py \
+        ".opencode/context_packages/$LATEST_PACKAGE" \
+        "$TESTCASE_FILE" \
+        "$CONFIG_FILE"
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Validation failed for $TESTCASE_FILE"
+        VALIDATION_FAILED=1
+    else
+        echo "✅ Validation passed for $TESTCASE_FILE"
+    fi
+    echo ""
+done
+
+if [ $VALIDATION_FAILED -eq 1 ]; then
+    echo "❌ Commit blocked: TestCase validation failed"
+    echo ""
+    echo "💡 To fix:"
+    echo "   1. Review the validation errors above"
+    echo "   2. Run: $PYTHON_CMD .opencode/tools/fix_case.py <package> <python_file> <yaml_file>"
+    echo "   3. Fix the issues and try again"
+    echo ""
+    echo "⚠️  To bypass this check (not recommended):"
+    echo "   git commit --no-verify"
+    exit 1
+fi
+
+echo "✅ All validations passed"
+exit 0
